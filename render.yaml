@@ -1,0 +1,28 @@
+# Import this repository as a Render Blueprint.
+# Starter and its persistent disk are paid resources. Review current prices
+# in Render before approving creation. No secret values belong in this file.
+services:
+  - type: web
+    name: flota-inspectii
+    runtime: node
+    region: frankfurt
+    plan: starter
+    buildCommand: npm test
+    startCommand: npm start
+    healthCheckPath: /api/health
+    autoDeploy: false
+    envVars:
+      - key: NODE_VERSION
+        value: 24.19.0
+      - key: HOST
+        value: 0.0.0.0
+      - key: DATA_DIR
+        value: /var/data
+      - key: DRIVER_ACCESS_CODE
+        sync: false
+      - key: ADMIN_ACCESS_CODE
+        sync: false
+    disk:
+      name: flota-data
+      mountPath: /var/data
+      sizeGB: 1

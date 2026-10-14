@@ -1,0 +1,9 @@
+{
+  "name": "inspectie-flota",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Inspecții săptămânale pentru camioane și remorci, cu fotografii și lucru offline",
+  "scripts": {"start": "node server.mjs", "test": "node --test"},
+  "engines": {"node": ">=24"}
+}

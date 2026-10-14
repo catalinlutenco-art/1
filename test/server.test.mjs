@@ -1,0 +1,27 @@
+import { test, before, after } from 'node:test';
+import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { randomUUID } from 'node:crypto';
+
+let server, data, base, driver, admin;
+const jpeg='data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAAAAX/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCwAB//2Q==';
+const slots=['cabina','bord','fata','spate','stanga','dreapta','remorcaExterior','remorcaInterior'];
+function report() {return {id:randomUUID(),uploadKey:randomUUID(),driver:'Șofer Test',truck:'B 123 ABC',trailer:'B 456 DEF',notes:'',condition:'ok',capturedAt:new Date().toISOString(),photos:Object.fromEntries(slots.map(s=>[s,jpeg]))};}
+async function request(route,token,method='GET',body) {const r=await fetch(base+route,{method,headers:{'Content-Type':'application/json',...(token?{Authorization:`Bearer ${token}`}:{})},body:body?JSON.stringify(body):undefined});return {status:r.status,body:await r.json()};}
+before(async()=>{
+  data=await mkdtemp(path.join(tmpdir(),'flota-test-'));
+  server=spawn(process.execPath,['server.mjs'],{cwd:new URL('..',import.meta.url),env:{...process.env,PORT:'0',DATA_DIR:data,DRIVER_ACCESS_CODE:'test-driver-code',ADMIN_ACCESS_CODE:'test-admin-code'},stdio:['ignore','pipe','pipe']});
+  base=await new Promise((resolve,reject)=>{let text='';const timeout=setTimeout(()=>reject(new Error('Server startup timeout')),10000);server.stdout.on('data',chunk=>{text+=chunk;const match=text.match(/portul (\d+)/);if(match){clearTimeout(timeout);resolve(`http://127.0.0.1:${match[1]}`);}});server.on('exit',code=>{clearTimeout(timeout);reject(new Error(`Server exited: ${code}`));});});
+  driver=(await request('/api/login',null,'POST',{code:'test-driver-code'})).body.token;
+  admin=(await request('/api/login',null,'POST',{code:'test-admin-code'})).body.token;
+});
+after(async()=>{if(server&&server.exitCode===null){const done=new Promise(resolve=>server.once('exit',resolve));server.kill('SIGTERM');await done;}if(data)await rm(data,{recursive:true,force:true});});
+test('serves app shell, service worker and health',async()=>{assert.equal((await request('/api/health')).body.ok,true);for(const route of ['/','/app.js','/style.css','/sw.js','/manifest.webmanifest','/icon.svg']){assert.equal((await fetch(base+route)).status,200);}assert.equal((await fetch(base+'/.data/access-codes.json')).status,404);});
+test('requires authentication and separates driver/admin permissions',async()=>{assert.equal((await request('/api/reports')).status,401);assert.equal((await request('/api/login',null,'POST',{code:'wrong-access-code'})).status,401);assert.equal((await request('/api/reports',driver)).status,403);assert.equal((await request('/api/reports',admin,'POST',report())).status,403);assert.equal((await request('/api/vehicles',driver,'POST',{plate:'B 123 ABC',kind:'truck'})).status,403);});
+test('stores complete inspection, exposes details only to administrator',async()=>{const r=report();assert.equal((await request('/api/reports',driver,'POST',r)).status,200);const list=await request('/api/reports',admin);assert.equal(list.body.length,1);assert.equal(list.body[0].photoCount,8);assert.equal(list.body[0].photos,undefined);const detail=await request('/api/reports/'+r.id,admin);assert.equal(detail.body.photos.cabina,jpeg);assert.equal(detail.body.driver,r.driver);assert.ok(detail.body.receivedAt);assert.equal((await request('/api/reports/'+r.id,driver)).status,403);});
+test('retry is idempotent even after reconnecting with a new session',async()=>{const r=report();await request('/api/reports',driver,'POST',r);const renewed=(await request('/api/login',null,'POST',{code:'test-driver-code'})).body.token;assert.equal((await request('/api/reports',renewed,'POST',r)).status,200);const list=await request('/api/reports',admin);assert.equal(list.body.filter(v=>v.id===r.id).length,1);assert.equal((await request('/api/reports',renewed,'POST',{...r,uploadKey:randomUUID()})).status,409);});
+test('rejects missing photos, invalid images and damage without observations',async()=>{const r=report();delete r.photos.bord;assert.equal((await request('/api/reports',driver,'POST',r)).status,400);assert.equal((await request('/api/reports',driver,'POST',{...report(),condition:'damage'})).status,400);const bad=report();bad.photos.bord='data:image/jpeg;base64,bm90LWEtcGhvdG8=';assert.equal((await request('/api/reports',driver,'POST',bad)).status,400);assert.equal((await request('/api/reports',driver,'POST',{...report(),truck:'<script>'})).status,400);assert.equal((await request('/api/reports',driver,'POST',{...report(),condition:'damage',notes:'Lampă spartă'})).status,200);});
+test('registers vehicles and revokes session on logout',async()=>{assert.equal((await request('/api/vehicles',admin,'POST',{plate:'CJ 10 ABC',kind:'truck'})).status,201);assert.ok((await request('/api/vehicles',driver)).body.some(v=>v.plate==='CJ 10 ABC'));const token=(await request('/api/login',null,'POST',{code:'test-driver-code'})).body.token;assert.equal((await request('/api/logout',token,'POST',{})).status,200);assert.equal((await request('/api/vehicles',token)).status,401);});
